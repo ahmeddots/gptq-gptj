@@ -23,6 +23,7 @@ def get_gptj(model):
     from transformers import GPTJForCausalLM
     model = GPTJForCausalLM.from_pretrained(model, torch_dtype='auto')
     model.seqlen = 2048
+    model.to(DEV)
     return model
 
 def load_quant(model, checkpoint, wbits):
