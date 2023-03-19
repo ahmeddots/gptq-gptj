@@ -30,7 +30,6 @@ def gptj_sequential(model, dataloader, dev, means=None, stds=None):
     layers = model.transformer.h
 
     model.transformer.wte = model.transformer.wte.to(dev)
-    model.transformer.wpe = model.transformer.wpe.to(dev)
     layers[0] = layers[0].to(dev)
 
     dtype = next(iter(model.parameters())).dtype
@@ -59,7 +58,6 @@ def gptj_sequential(model, dataloader, dev, means=None, stds=None):
     layers = model.transformer.h
     layers[0] = layers[0].cpu()
     model.transformer.wte = model.transformer.wte.cpu()
-    model.transformer.wpe = model.transformer.wpe.cpu()
     model.transformer.ln_f = model.transformer.ln_f.cpu()
     torch.cuda.empty_cache()
 
@@ -124,7 +122,6 @@ def gptj_eval(model, testenc, dev):
     layers = model.transformer.h
 
     model.transformer.wte = model.transformer.wte.to(dev)
-    model.transformer.wpe = model.transformer.wpe.to(dev)
     layers[0] = layers[0].to(dev)
 
     dtype = next(iter(model.parameters())).dtype
@@ -154,7 +151,6 @@ def gptj_eval(model, testenc, dev):
     layers = model.transformer.h
     layers[0] = layers[0].cpu()
     model.transformer.wte = model.transformer.wte.cpu()
-    model.transformer.wpe = model.transformer.wpe.cpu()
     model.transformer.ln_f = model.transformer.ln_f.cpu()
     torch.cuda.empty_cache()
     
