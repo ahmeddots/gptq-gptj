@@ -19,7 +19,14 @@ The current release includes the following features:
 * `datasets`: tested on v1.17.0
 * (to run 3-bit kernels: setup for compiling PyTorch CUDA extensions, see also https://pytorch.org/tutorials/advanced/cpp_extension.html, tested on CUDA 11.4)
 
-All experiments were run on a single 80GB NVIDIA A100. However, most experiments will work on a GPU with a lot less memory as well.
+All experiments were run on a single 80GB NVIDIA A100. However, most experiments will work on a GPU with a lot less memory as well
+
+## Installation
+```
+pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu117
+git clone https://github.com/AlpinDale/gptq-gptj && cd gptq-gptj
+pip install -r requirements.txt
+```
 
 ## Language Generation
 
