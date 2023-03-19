@@ -138,16 +138,16 @@ if __name__ == '__main__':
             #top_p=args.top_p,
             #temperature=args.temperature,
         #)
-     with torch.no_grad():
-        generated_ids = model.generate(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            pad_token_id=tokenizer.eos_token_id,
-            do_sample=True,
-            min_length=args.min_length,
-            max_length=args.max_length,
-            top_p=args.top_p,
-            temperature=args.temperature,
-        )
+    with torch.no_grad():
+       generated_ids = model.generate(
+           input_ids=input_ids,
+           attention_mask=attention_mask,
+           pad_token_id=tokenizer.eos_token_id,
+           do_sample=True,
+           min_length=args.min_length,
+           max_length=args.max_length,
+           top_p=args.top_p,
+           temperature=args.temperature,
+       )
      
     print(tokenizer.decode([el.item() for el in generated_ids[0]]))
