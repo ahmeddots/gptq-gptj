@@ -112,9 +112,9 @@ if __name__ == '__main__':
         model = get_gptj(args.model)
         model.eval()
         
-    model.to(DEV)
-    tokenizer = AutoTokenizer.from_pretrained(args.model)
-    input_ids = tokenizer.encode(args.text, return_tensors="pt").to(DEV)
+   # model.to(DEV)
+   # tokenizer = AutoTokenizer.from_pretrained(args.model)
+   # input_ids = tokenizer.encode(args.text, return_tensors="pt").to(DEV)
 
     with torch.no_grad():
         generated_ids = model.generate(
