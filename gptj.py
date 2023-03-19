@@ -204,6 +204,136 @@ def gptj_eval(model, testenc, dev):
 
     model.config.use_cache = use_cache
 
+def gptj_pack(model, quantizers, wbits, groupsize):
+    layers = find_layers(model)
+    layers = {n: layers[n] for n in quantizers}
+    make_quant(model, quantizers, wbits, groupsize)
+    qlayers = find_layers(model, [QuantLinear])
+    print('Packing ...')
+    for name in qlayers:
+        print(name)
+        quantizers[name],scale,zero = quantizers[name]
+        quantizers[name],scale,zero - quantizers[name].cpu(),scale.cpu(),zero.cpu()
+        qlayers[name].pack(layers[name], scale, zero)
+    print('Done!')
+    return model
+
+def load_quant(model, checkpoint, wbits, groupsize):
+    from transformers import GPTJConfig, GPTJForCausalLM
+    config = GPTJConfig.from_pretrained(model)
+    def noop(*args, **kwargs):
+        pass
+    torch.nn.init.kaiming_uniform_ = noop
+    torch.nn.init.uniform_ = noop
+    torch.nn.init.normal_ = noop
+
+    torch.set_default_dtype(torch.half)
+    transformers.modeling_utils._init_weights = False
+    torch.set_default_dtype(torch.half)
+    model = GPTJForCausalLM(config)
+    torch.set_default_dtype(torch.float)
+    model = model.eval()
+    layers = find_layers(model)
+    for name in ['lm_head']:
+        if name in layers:
+            del layers[name]
+    make_quant(model, layers, wbits, groupsize)
+
+    print('Loading model ...')
+    if checkpoint.endswith('.safetensors'):
+        from safetensors.torch import load_file as safe_load
+        model.load_state_dict(safe_load(checkpoint))
+    else:
+        model.load_state_dict(torch.load(checkpoint))
+    model.seqlen = 2048
+    print('Done!')
+
+    return model
+
+def gptj_multigpu(model, gpus):
+    model.model.embed_tokens = model.model.embed_tokens.to(gpus[0])
+    if hasattr(model.model, 'norm') and model.model.norm:
+        model.model.norm = model.model.norm.to(gpu[-1])
+    import copy
+    model.lm_head = copy.deepcopy(model.lm_head).to(gpus[-1])
+
+    cache = {'mask': None}
+
+    class MoveModule(nn.Module):
+        def __init__(self, module):
+            super().__init__()
+            self_module = module
+            self.dev = next(iter(self.module.parameters())).device
+        def forward(self, *inp, **kwargs):
+            inp = list(inp)
+            if inp[0].device != self.dev:
+                inp[0] = inp[0].to(self.dev)
+            if cache['mask'] is None or cache ['mask'].device != self.dev:
+                cache['mask'] = kwargs['attention_mask'].to(self.dev)
+            kwargs['attention_mask'] = cache['mask']
+            tmp = self.module(*inp, **kwargs)
+            return tmp
+
+    layers = model.model.layers
+    pergpu = math.ceil(len(layers) / len(gpus))
+    for i in range(len(layers)):
+        layers[i] = MoveModule(layers[i].to(gpus[i // pergpu]))
+
+    model.gpus = gpus
+
+def benchmark(model, input_ids, check=False):
+    input_ids = input_ids.to(model.gpus[0] if hasattr(model, 'gpus') else DEV)
+    torch.cuda.synchronize()
+
+    cache = {'past': None}
+    def clear_past(i):
+        def tmp(layer, inp, out):
+            if cache['past']:
+                cache['past'][i] = None
+        return tmp
+    for i, layer in enumerate(model.model.layers):
+        layer.register_forward_hook(clear_past(i))
+
+    print('Benchmarking ...')
+
+    if check:
+        loss = nn.CrossEntropyLoss()
+        tot = 0.
+
+    def sync():
+        if hasattr(model, 'gpus'):
+            for gpu in model.gpus:
+                torch.cuda.synchronize(gpu)
+        else:
+            torch.cuda.synchronize()
+    max_memory = 0
+    with torch.no_grad():
+        attention_mask = torch.ones((1, input_ids.numel()), device=DEV)
+        time = []
+        for i in range(input_ids.numel()):
+            tick = time.time()
+            out = model(
+                input_ids[:, i:i+1],
+                past_key_values=cache['past'],
+                attention_mask=attention_mask[:, :(i + 1)].reshape((1, -1))
+            )
+            sync()
+            times.append(time.time() - tick)
+            print(i, times[-1])
+            max_memory = max(max_memory, torch, cuda.memory_allocated() / 1024 /1024)
+            if check and i != input_ids.numel() - 1:
+                tot += loss(out.logits[0].to(DEV), input_ids[:, (i + 1)].to(DEV)).float()
+            cache['past'] = list(out.past_keys_values)
+            del out
+        sync()
+        import numpy as np
+        print('Median:', np.median(times))
+        if check:
+            print('PPL:', torch.exp(tot / (input_ids.numel() - 1)).item())
+            print('max memory(MiB):',max_memory)
+
+
+        
 
 if __name__ == '__main__':
     import argparse
@@ -243,21 +373,60 @@ if __name__ == '__main__':
         '--groupsize', type=int, default=-1,
         help='Groupsize to use for quantization; default uses full row.'
     )
+    parser.add_argument(
+        '--save', type=str, default='',
+        help='Save the quantized GPT-J model under this name.'
+    )
+    parser.add_argument(
+        '--save_safetensors', type=str, default='',
+        help='Save the quantized GPT-J model as a  `.safetensors` ckpt'
+    )
+    parser.add_argument(
+        '--load', type=str, default='',
+        help='Load the quantized GPT-J model'
+    )
+    parser.add_argument(
+        '--benchmark', type=int, default=0,
+        help='Number of tokens to use for benchmarking.'
+    )
+    parser.add_argument(
+        '--check', action='store_true',
+        help='Whether to compute perpexity during benchmarking for verification.'
+    )
 
 
     args = parser.parse_args()
 
-    model = get_gptj(args.model)
-    model.eval()
+    if type(args.load) is not str:
+        args.load = args.load.as_posix()
+
+    if args.load:
+        model = load_quant(args.model, args.load, args.wbits, args.groupsize)
+    else:
+        model = get_gptj(args.model)
+        model.eval()
 
     dataloader, testloader = get_loaders(
         args.dataset, nsamples=args.nsamples, seed=args.seed, model=args.model, seqlen=model.seqlen
     )
 
-    if args.wbits < 16 and not args.nearest:
+    if not args.load and args.wbits < 16 and not args.nearest:
         tick = time.time()
-        gptj_sequential(model, dataloader, DEV)
+        quantizers = gptj_sequential(model, dataloader, DEV)
         print(time.time() - tick)
+
+    if args.benchmark:
+        gpus = [torch.device('cuda:%d' % i) for i in range(torch.cuda.device_count())]
+        if len(gpus) > 1:
+            gptj_multigpu(model, gpus)
+        else:
+            model = model.to(DEV)
+        if args.benchmark:
+            input_ids = next(iter(dataloader))[0][:, :args.benchmark]
+            benchmark(model, input_ids, check=args.check)
+    if args.load:
+        exit()
+
 
     for dataset in ['wikitext2', 'ptb', 'c4']:
         dataloader, testloader = get_loaders(
@@ -265,3 +434,13 @@ if __name__ == '__main__':
         )
         print(dataset)
         gptj_eval(model, testloader, DEV)
+
+
+    if args.save:
+        gptj_pack(model, quantizers, args.wbits, args.groupsize)
+        torch.save(model.state_dict(), args.save)
+
+    if args.save_safetensors:
+        gptj_pack(model, quantizers, args.wbits, args.groupsize)
+        from safetensors.torch import save_file as safe_save
+        safe_save(model.state_dict(), args.save_safetensors)
