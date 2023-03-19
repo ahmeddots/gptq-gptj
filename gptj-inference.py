@@ -6,7 +6,7 @@ import time
 import torch
 import torch.nn as nn
 from gptq import *
-from modeluitls import *
+from modelutils import *
 from quant import *
 
 from transformers import AutoTokenizer
