@@ -1,3 +1,7 @@
+# Code originally belongs to the LLaMA GPTQ implementation at
+#     https://github.com/qwopqwop200/GPTQ-for-LLaMa
+# I've adapted it to work with GPT-J.
+
 import time
 import torch
 import torch.nn as nn
