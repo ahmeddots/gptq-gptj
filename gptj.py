@@ -166,7 +166,7 @@ def gptj_eval(model, testenc, dev):
             for name in subset:
                 quantizer = Quantizer()
                 quantizer.configure(
-                    args.wbits, perchannel=True, syn=False, mse=False
+                    args.wbits, perchannel=True, sym=False, mse=False
                 )
                 W = subset[name].weight.data
                 quantizer.find_params(W, weight=True)
