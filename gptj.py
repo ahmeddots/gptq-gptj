@@ -183,20 +183,24 @@ def gptj_eval(model, testenc, dev):
 
     model.transformer.ln_f = model.transformer.ln_f.to(dev)
     model.lm_head = model.lm_head.to(dev)
-
-    input_ids = test_dataset['input_ids'].to(dev)
+    
+    testenc = testenc.to(dev)
     nlls = []
     for i in range(nsamples):
-        inputs = {'input_ids': input_ids[:, i * model.seqlen:(i + 1) * model.seqlen].to(dev)}
-        lm_logits = model(**inputs).logits
+        hidden_states = inps[i].unsqueeze(0)
+        hidden_states = model.transformer.ln_f(hidden_states)
+        lm_logits = model.lm_head(hidden_states)
         shift_logits = lm_logits[:, :-1, :].contiguous()
-        shift_labels = input_ids[:, (i * model.seqlen) + 1:(i + 1) * model.seqlen].to(dev)
+        shift_labels = testenc[
+            :, (i * model.seqlen):((i + 1) * model.seqlen)
+        ][:, 1:]
         loss_fct = nn.CrossEntropyLoss()
         loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
-        neg_log_likelihood = loss.float() * (model.seqlen - 1)
+        neg_log_likelihood = loss.float() * model.seqlen
         nlls.append(neg_log_likelihood)
-    ppl = torch.exp(sum(nlls) / (nsamples * model.seqlen))
+    ppl = torch.exp(torch.stack(nlls).sum() / (nsamples * model.seqlen))
     print(ppl.item())
+    
 
     model.config.use_cache = use_cache
 
