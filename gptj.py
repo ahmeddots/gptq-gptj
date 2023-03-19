@@ -264,4 +264,4 @@ if __name__ == '__main__':
             dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
         )
         print(dataset)
-        bloom_eval(model, testloader, DEV)
+        gptj_eval(model, testloader, DEV)
