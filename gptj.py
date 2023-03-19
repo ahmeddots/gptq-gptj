@@ -252,7 +252,7 @@ if __name__ == '__main__':
 
     if args.wbits < 16 and not args.nearest:
         tick = time.time()
-        bloom_sequential(model, dataloader, DEV)
+        gptj_sequential(model, dataloader, DEV)
         print(time.time() - tick)
 
     for dataset in ['wikitext2', 'ptb', 'c4']:
