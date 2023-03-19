@@ -123,7 +123,7 @@ if __name__ == '__main__':
         
     model.eval()
     tokenizer = get_tokenizer(args.model)
-    input_ids = torch.tensor(tokenizer.encode(args.text)).unsqueeze(0).to(torch.int4)
+    input_ids = torch.tensor(tokenizer.encode(args.text)).unsqueeze(0).to(torch.int8)
 
     
     
