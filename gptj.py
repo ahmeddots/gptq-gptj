@@ -163,14 +163,14 @@ def gptj_eval(model, testenc, dev):
 
     for i in range(len(layers)):
         print(i)
-        layer = layers[i].to.(dev)
+        layer = layers[i].to(dev)
 
         if args.nearest:
             subset  = find_layers(layer)
             for name in subset:
                 quantizer = Quantizer()
                 quantizer.configure(
-                    args.wbitsm perchannel=True, syn=False, mse=False
+                    args.wbits, perchannel=True, syn=False, mse=False
                 )
                 W = subset[name].weight.data
                 quantizer.find_params(W, weight=True)
@@ -207,7 +207,7 @@ def gptj_eval(model, testenc, dev):
 
 if __name__ == '__main__':
     import argparse
-    import datautils import *
+    from datautils import *
 
     parser = argparse.ArgumentParser()
 
@@ -247,7 +247,7 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
-    model = get_bloom(args.model)
+    model = get_gptj(args.model)
     model.eval()
 
     dataloader, testloader = get_loaders(
