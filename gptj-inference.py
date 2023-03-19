@@ -57,6 +57,15 @@ def load_quant(model, checkpoint, wbits):
 
     return model
 
+
+def get_tokenizer(model):
+    from transformers import AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained(model)
+    return tokenizer
+
+
+
 if __name__ == '__main__':
     import argparse
     from datautils import *
@@ -112,9 +121,12 @@ if __name__ == '__main__':
         model = get_gptj(args.model)
         model.eval()
         
-   # model.to(DEV)
-   # tokenizer = AutoTokenizer.from_pretrained(args.model)
-   # input_ids = tokenizer.encode(args.text, return_tensors="pt").to(DEV)
+    model.eval()
+    tokenizer = get_tokenizer(args.model)
+    input_ids = torch.tensor(tokenizer.encode(args.text)).unsqueeze(0)
+
+    
+    
 
     with torch.no_grad():
         generated_ids = model.generate(
