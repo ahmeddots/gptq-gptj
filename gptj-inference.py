@@ -22,7 +22,7 @@ def get_gptj(model):
     return model
 
 def load_quant(model, checkpoint, wbits):
-    from transformers import LlamaConfig, LlamaForCausalLM 
+    from transformers import GPTJConfig, GPTJForCausalLM 
     config = GPTJConfig.from_pretrained(model)
     def noop(*args, **kwargs):
         pass
