@@ -6,7 +6,7 @@ This repository contains the code for the paper [GPTQ: Accurate Post-training Co
 The current release includes the following features:
 
 * An efficient implementation of the GPTQ algorithm: `gptq.py`
-* Compressing all models from the OPT and BLOOM families to 2/3/4 bits, including weight grouping: `opt.py`, `bloom.py`, `gptj.py,` `zeroShot/`
+* Compressing all models from the OPT, BLOOM and GPT-J families to 2/3/4 bits, including weight grouping: `opt.py`, `bloom.py`, `gptj.py,` `zeroShot/`
 * Evaluating the perplexity of quantized models on several language generation tasks: `opt.py`, `bloom.py`, `gpt-j.py`
 * Evaluating the performance of quantized models on several ZeroShot tasks: `zeroShot/`
 * A 3-bit quantized matrix full-precision vector product CUDA kernel: `quant_cuda_kernel.cu`, `quant_cuda.cpp`, `setup_cuda.py`
