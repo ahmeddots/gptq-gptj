@@ -46,7 +46,7 @@ CUDA_VISIBLE_DEVICES=0 python gptj.py EleutherAI/gpt-j-6b c4 --wbits 4 [--groups
 # Install kernels
 python setup_cuda.py install
 
-# Benchmark performance for for GPT-J 6B
+# Benchmark performance of the FC2 layer of GPT-J
 CUDA_VISIBLE_DEVICES=0 python test_kernel.py
 
 # Save compressed model
