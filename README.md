@@ -1,6 +1,6 @@
 # GPTQ
 
-### The GPT-J implementation is still untested, so let me know if it works or if you run into errors!
+### The GPT-J implementation is still (mostly) untested, so let me know if it works or if you run into errors!
 
 This repository contains the code for the paper [GPTQ: Accurate Post-training Compression for Generative Pretrained Transformers](https://arxiv.org/abs/2210.17323). 
 The current release includes the following features:
