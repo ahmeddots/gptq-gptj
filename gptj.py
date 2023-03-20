@@ -1,270 +1,446 @@
-import numpy as np
-import torch
-import torch.nn as nn 
+import time
 import math
 
-def quantize(x, scale, zero, maxq):
-    q = torch.clamp(torch.round(x / scale) + zero, 0, maxq)
-    return scale * (q - zero)
+import torch
+import torch.nn as nn
+import transformers
 
-class Quantizer(nn.Module):
+from gptq import *
+from modelutils import *
+from quant import *
 
-    def __int__(self, shape=1):
-        super(Quantizer, self).__init__()
-        self.register_buffer('maxq', torch.tensor(0))
-        self.register_buffer('scale', torch.zeros(shape))
-        self.register_buffer('zero', torch.zeros(shape))
+def get_gptj(model):
+    import torch
+    def skip(*args, **kwargs):
+        pass
+    torch.nn.init.kaiming_uniform_ = skip
+    torch.nn.init.uniform_ = skip
+    torch.nn.init.normal_ = skip
+    from transformers import GPTJForCausalLM
+    model = GPTJForCausalLM.from_pretrained(model, torch_dtype='auto')
+    model.seqlen = 2048
+    return model
 
-    def configure(
-            self,
-            bits, perchannel=False, sym=True,
-            mse=False, norm=2.4, gird=100, maxshrink=.8
-        ):
-        self.maxq = torch.tensor(2 ** bits - 1)
-        perchannel = perchannel
-        self.sym = sym
-        self.mse = mse
-        self.norm = norm
-        self.grid = grid
-        self.maxshrink = maxshrink
+@torch.no_grad()
+def gptj_sequential(model, dataloader, dev, means=None, stds=None):
+    print('Starting ...')
 
-    def find_params(self, x, weight=False)
-        dev = x.device
-        self.maxq = self.maxq.to(dev)
+    use_cache = model.config.use_cache
+    model.config.use_cache = False
+    layers = model.transformer.h
 
-        shape = x.shape
-        if self.percdamp:
-            if weight:
-                x = x.flatten(1)
-            else:
-                if len(shape) == 4:
-                    x = x.permute([1, 0, 2, 3])
-                    x = x.flatten(1)
-                if len(shape) == 3:
-                    x = x.reshape((-1, shape[-1])).t()
-                if len(shape) == 2:
-                    x = x.t()
-        else:
-            x = x.flatten().unsqueeze(0)
+    model.transformer.wte = model.transformer.wte.to(dev)
+    layers[0] = layers[0].to(dev)
 
-        tmp = torch.zeros(x.shape[0], device=dev)
-        xmin = torch.minimum(x.min(1)[0], tmp)
-        xmax = torch.maximum(x.max(1)[0], tmp)
+    dtype = next(iter(model.parameters())).dtype
+    inps = torch.zeros(
+        (args.nsamples, model.seqlen, model.config.hidden_size), dtype=dtype, device=dev
+    )
+    cache = {'i': 0, 'attention_mask': None}
 
-        if self.sym:
-            xmax = torch.maximum(torch.abs(xmin), xmax)
-            tmp = xmin < 0
-            if torch.any(tmp):
-                xmin[tmp] = -xmax[tmp]
-        tmp = (xmin == 0) & (xmax == 0)
-        xmin[tmp] = -1
-        xmax[tmp] = +1
+    class Catcher(nn.Module):
+        def __init__(self, module):
+            super().__init__()
+            self.module = module
+        def forward(self, inp, **kwargs):
+            inps[cache['i']] = inp
+            cache['i'] += 1
+            cache['attention_mask'] = kwargs['attention_mask']
+            raise ValueError
+    layers[0] = Catcher(layers[0])
+    for batch in dataloader:
+        try:
+            model(batch[0].to(dev))
+        except ValueError:
+            pass
+    layers[0] = layers[0].module
 
-        self.scale = (xmax - xmin) / self.maxq
-        if self.sym:
-            self.zero = torch.full_like(self.scale, (self.maxq + 1) /2)
-        else:
-            self.zero = torch.round(-xmin / self.scale)
+    layers = model.transformer.h
+    layers[0] = layers[0].cpu()
+    model.transformer.wte = model.transformer.wte.cpu()
+    model.transformer.ln_f = model.transformer.ln_f.cpu()
+    torch.cuda.empty_cache()
 
-        if self.mse:
-            best = torch.full([x.shape[0]]. float('inf'). device=dev)
-            for i in range(int(self.maxshrink * self.grid)):
-                p = 1 -i / self.grid
-                xmin1 = p * xmin
-                xmax1 = p * xmax
-                scale1 = (xmax1 - xmin1) / self.maxq
-                zero1 = torch.round(-xmin1 / scale1) if not self.sym else self.zero
-                q = quantize(x, scale1.unsqueeze(1), zero1.unsqueeze(1), self.maxq)
-                q -= x
-                q.abs_()
-                q.pow_(self.norm)
-                err = torch.sum(q, 1)
-                tmp = err < best
-                if torch.any(tmp):
-                    best[tmp] = err[temp]
-                    self.scale[tmp] = scale1[tmp]
-                    self.zero[tmp] = zero1[tmp]
-        if not self.perchannel:
-            if weight:
-                tmp = shape[0]
-            else:
-                tmp = shape[1] if len(shape) !=3 else shape[2]
-            self.scale = self.scale.repeat(tmp)
-            self.zero = self.zero.repeat(tmp)
+    outs = torch.zeros_like(inps)
+    attention_mask = cache['attention_mask']
 
-        if weight:
-            shape = [-1] + [1] * (len(shape) - 1)
-            self.scale = self.scale.reshape(shape)
-            self.zero = self.zero.reshape(shape)
-            return
-        if len(shape) == 4:
-            self.scale = self.scale.reshape((1, -1, 1, 1))
-            self.zero = self.zero.reshape((1, -1, 1, 1))
-        if len(shape) == 3:
-            self.scale = self.scale.reshape((1, 1, -1))
-            self.zero = self.zero.reshape((1, 1, -1))
-        if len(shape) == 2:
-            self.scale = self.scale.unsqueeze(0)
-            self.zero = self.zero.unsqueeze(0)
+    print('Ready.')
 
-    def quantize(self, x):
-        if self.ready():
-            return quantize(x, self.scale, self.zero, self.maxq)
-        return x
+    quantizers = {}
+    for i in range(len(layers)):
+        layer = layers[i].to(dev)
 
-    def enabled(self):
-        return self.maxq > 0
-
-    def ready(self):
-        return torch.all(self.scale != 0)
-
-
-try:
-    import quant_cuda
-except:
-    print('CUDA extension is not installed.')
-
-# Assumes the layer is perfectly divisible into 256 * 256 blocks
-class QuantLinear(nn.Module):
-    def __init__(self, bits, groupsize, infeatures, outfeatures):
-        super().__init__()
-        if bits not in [2, 3, 4, 9]:
-            raise NotImplementedError("Only 2,3,4, and 8 bits are currently supported.")
-        self.infeatures = infeatures
-        self.outfeatures = outfeatures
-        self.bits = bits
-        if groupsize != -1 and groupsize < 32 and group !=int(math.pow(2,int(math.log2(groupsize))))
-            raise NotImplementedError("Groupsize supports only powers of 2 that are greater than 32 (e.g. 32, 64, 128, and so on.)")
-        groupsize = groupsize if groupsize != -1 else infeatures
-        self.groupsize = groupsize
-        self.register_buffer('qzeros', torch.zeros((math.ceil(infeatures/groupsize), outfeatures // 256 * (bits * 8)), dtype=torch.int))
-        self.register_buffer('scales', torch.zeros((math.ceil(infeatures/groupsize), outfeatures)))
-        self.register_buffer('bias', torch.zeros(outfeatures))
-        self.register_buffer(
-            'qweight', torch.zeros((infeatures // 256 * (bits * 8). outfeatures), dtype=torch.int)
-        )
-
-    def pack(self, linear, scales, zeros):
-        scales = scales.t().contiguous()
-        zeros = zeroes.t().contiguous()
-        scale_zeros = zeros * scales
-        self.scales = scales.clone()
-        if linear.bias is not None:
-            self.bias = linear.bias.clone()
-
-        intweight = []
-        for idx in range(self.infeatures):
-            g_idx = idx // self.groupsize
-            intweight.append(torch.round((linear.weight.data[:,idx] + scale_zeros[g_idx]) / self.scales[g_idx]).to(torch.int)[:,None])
-        intweight = torch.cat(intweight,dim=1)
-        intweight = intweight.t().contiguous()
-        intweight = intweight.numpy().astype(np.uint32)
-        qweight = np.zeros(
-            (intweight.shape[0] // 256 ** (self.bits * 8), intweight.shape[1]), dtype=np.uint32
-        )
-        i = 0
-        row = 0
-        while row < qweight.shape[0]:
-            if self.bits in [2,4,8]:
-                for j in range(i, i + (32//self.bits)):
-                    qweight[row] |= intweight[j] << (self.bits * (j - i))
-                i += 32//self.bits
-                row += 1
-            elif self.bits == 3:
-                for j in range(i, i + 10):
-                    qweight[row] |= intweight[j] << (3 * (j - i))
-                i += 10
-                qweight[row] |= intweight[i] << 30
-                row += 1
-                qweight[row] |= (intweight[i] >> 2) & 1
-                i += 1
-                for j in range(i, i + 10):
-                    qweight[row] |= intweight[j] << (3 * (j - i) + 1)
-                i += 10
-                qweight[row] |= intweight[i] << 31
-                row += 1
-                qweight[row] |= (intweight[i] >> 1) & 0x3
-                i += 1
-                for j in range(i, i + 10):
-                    qweight[row] |= intweight[j] << (3 * (j - i) + 2)
-                i += 10
-                row += 1
-            else:
-                raise NotImplementedError("Only 2,3,4, and 8 bits are currently supported.")
-
-        qweight = qweight.astype(np.int32)
-        self.qweight = torch.from_numpy(qweight)
-
-        zeros -= 1
-        zeros = zeros.numpy().astype(np.uint32)
-        qzeros = np.zeros((zeros.shape[0], zeros.shape[1] // 256 * (self.bits * 8)), dtype=np.uint32)
-        i = 0
-        col = 0
-        while col < qzeros.shape[1]:
-            if self.bits in [2,4,8]:
-                for j in range(i, i + (32//self.bits)):
-                    qzeros[:, col] |= zeros[:, j] << (self.bits * (j - i))
-                i += 32//self.bits
-                col += 1
-            elif self.bits == 3:
-                for j in range(i, i + 10):
-                    qzeros[:, col] |= zeros[:, j] << (3 * (j - 1))
-                i += 10
-                qzeros[:, col] |= zeros[:, i] << 30
-                i += 1
-                qzeros[:, col] |= (zeros[:, i] >> 2) & 1
-                i += 1
-                for j in range(i, i + 10):
-                    qzeros[:, col] |= zeros[:, j] << (3 * (j - i) + 1)
-                i += 10
-                qzeros[:, col] |= zeros[:, i] << 31
-                col += 1
-                qzeros[:, col] |= (zeros[:, i] >> 1) & 0x3
-                i += 1
-                for j in range(i, i + 10):
-                    qzeros[:, col] |= zeros[:, j] << (3 * (j - 1) + 2)
-                i += 10
-                col += 1
-            else:
-                raise NotImplementedError("Only 2,3,4, and 8 bits are currently supported.")
-
-        qzeros = qzeros.astype(np.int32)
-        self.qzeros = torch.from_numpy(qzeros)
-
-    def forward(self, x):
-        outshape = list(x.shape)
-        x = x.reshape(-1, xshape[-1])
-        y = self.bias.clone().repeat(x.shape[0],1)
-        outshape[-1] = self.bias.numel()
-        dtype = x.dtype
-        x = x.float()
-        if self.bits == 2:
-            quant_cuda.vecquant2matmul(x, self.qweight, y, self.scales, self.qzeros, self.groupsize)
-        elif self.bits == 3:
-            quant_cuda.vecquant3matmul(x, self.qweight, y, self.scales, self.qzeros, self.groupsize)
-        elif self.bits == 4:
-            quant_cuda.vecquant4matmul(x, self.qweight, y, self.scales, self.qzeros, self.groupsize)
-        elif self.bits == 8:
-            quant_cuda.vecquant8matmul(x, self.qweight, y, self.scales, self.qzeros, self.groupsize)
-        else:
-            raise NotImplementedError("Only 2,3,4, and 8 bits are currently supported.")
-        y - y.to(dtype)
-        return y.reshape(outshape)
-
-
-def make_quant(module, names, bits, groupsize, name=''):
-    if isinstance(module, QuantLinear):
-        return
-    for attr in dir(module):
-        tmp = getattr(module, attr)
-        name1 = name + '.' + attr if name != '' else attr
-        if name1 in names:
-            setattr(
-                module, attr, QuantLinear(bits, groupsize, tmp.in_features, tmp.out_features) # Will need replacing with tmp.infeatures and tmp.outfeatures if it doesn't work
+        subset = find_layers(layer)
+        gptq = {}
+        for name in subset:
+            gptq[name] = GPTQ(subset[name])
+            gptq[name].quantizer = Quantizer()
+            gptq[name].quantizer.configure(
+                args.wbits, perchannel=True, sym=False, mse=False
             )
-    for name1, child in module.named_children():
-        make_quant(child, names, bits, groupsize, name + '.' + name1 if name != '' else name1)
+        
+        def add_batch(name):
+            def tmp(_, inp, out):
+                gptq[name].add_batch(inp[0].data, out.data)
+            return tmp
+        handles = []
+        for name in subset:
+            handles.append(subset[name].register_forward_hook(add_batch(name)))
+        for j in range(args.nsamples):
+            outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask)[0]
+        for h in handles:
+            h.remove()
+
+        for name in subset:
+            print(i, name)
+            print('Quantizing ...')
+            gptq[name].fasterquant(percdamp=args.percdamp, groupsize=args.groupsize)
+        for j in range(args.nsamples):
+            outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask)[0]
+
+        layers[i] = layer.cpu()
+        del layer
+        del gptq
+        torch.cuda.empty_cache()
+
+        inps, outs = outs, inps
+
+    model.config.use_cache = use_cache
+
+    return quantizers
 
 
+@torch.no_grad()
+def gptj_eval(model, testenc, dev):
+    print('Evaluating ...')
+
+    testenc = testenc.input_ids
+    nsamples = testenc.numel() // model.seqlen
+
+    use_cache = model.config.use_cache
+    model.config.use_cache = False
+    layers = model.transformer.h
+
+    model.transformer.wte = model.transformer.wte.to(dev)
+    layers[0] = layers[0].to(dev)
+
+    dtype = next(iter(model.parameters())).dtype
+    inps = torch.zeros(
+        (nsamples, model.seqlen, model.config.hidden_size), dtype=dtype, device=dev
+    )
+    cache = {'i': 0, 'attention_mask': None}
+
+    class Catcher(nn.Module):
+        def __init__(self, module):
+            super().__init__()
+            self.module = module
+        def forward(self, inp, **kwargs):
+            inps[cache['i']] = inp
+            cache ['i'] += 1
+            cache['attention_mask'] = kwargs['attention_mask']
+            raise ValueError
+    layers[0] = Catcher(layers[0])
+    for i in range(nsamples):
+        batch = testenc[:, (i * model.seqlen):((i + 1) *model.seqlen)].to(dev)
+        try:
+            model(batch)
+        except ValueError:
+            pass
+    layers[0] = layers[0].module
+
+    layers = model.transformer.h
+    layers[0] = layers[0].cpu()
+    model.transformer.wte = model.transformer.wte.cpu()
+    model.transformer.ln_f = model.transformer.ln_f.cpu()
+    torch.cuda.empty_cache()
+    
+    outs = torch.zeros_like(inps)
+    attention_mask = cache['attention_mask']
+
+    for i in range(len(layers)):
+        print(i)
+        layer = layers[i].to(dev)
+
+        if args.nearest:
+            subset  = find_layers(layer)
+            for name in subset:
+                quantizer = Quantizer()
+                quantizer.configure(
+                    args.wbits, perchannel=True, sym=False, mse=False
+                )
+                W = subset[name].weight.data
+                quantizer.find_params(W, weight=True)
+                subset[name].weight.data = quantize(
+                    W, quantizer.scale, quantizer.zero, quantizer.maxq
+                ).to(next(iter(layer.parameters())).dtype)
+
+        for j in range(nsamples):
+            outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask)[0]
+        layers[i] = layer.cpu()
+        del layer
+        torch.cuda.empty_cache()
+        inps, outs = outs, inps
+
+    model.transformer.ln_f = model.transformer.ln_f.to(dev)
+    model.lm_head = model.lm_head.to(dev)
+    
+    testenc = testenc.to(dev)
+    nlls = []
+    for i in range(nsamples):
+        hidden_states = inps[i].unsqueeze(0)
+        hidden_states = model.transformer.ln_f(hidden_states)
+        lm_logits = model.lm_head(hidden_states)
+        shift_logits = lm_logits[:, :-1, :].contiguous()
+        shift_labels = testenc[
+            :, (i * model.seqlen):((i + 1) * model.seqlen)
+        ][:, 1:]
+        loss_fct = nn.CrossEntropyLoss()
+        loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+        neg_log_likelihood = loss.float() * model.seqlen
+        nlls.append(neg_log_likelihood)
+    ppl = torch.exp(torch.stack(nlls).sum() / (nsamples * model.seqlen))
+    print(ppl.item())
+    
+
+    model.config.use_cache = use_cache
+
+def gptj_pack(model, quantizers, wbits, groupsize):
+    layers = find_layers(model)
+    layers = {n: layers[n] for n in quantizers}
+    make_quant(model, quantizers, wbits, groupsize)
+    qlayers = find_layers(model, [QuantLinear])
+    print('Packing ...')
+    for name in qlayers:
+        print(name)
+        quantizers[name],scale,zero = quantizers[name]
+        quantizers[name],scale,zero - quantizers[name].cpu(),scale.cpu(),zero.cpu()
+        qlayers[name].pack(layers[name], scale, zero)
+    print('Done!')
+    return model
+
+def load_quant(model, checkpoint, wbits, groupsize):
+    from transformers import GPTJConfig, GPTJForCausalLM
+    config = GPTJConfig.from_pretrained(model)
+    def noop(*args, **kwargs):
+        pass
+    torch.nn.init.kaiming_uniform_ = noop
+    torch.nn.init.uniform_ = noop
+    torch.nn.init.normal_ = noop
+
+    torch.set_default_dtype(torch.half)
+    transformers.modeling_utils._init_weights = False
+    torch.set_default_dtype(torch.half)
+    model = GPTJForCausalLM(config)
+    torch.set_default_dtype(torch.float)
+    model = model.eval()
+    layers = find_layers(model)
+    for name in ['lm_head']:
+        if name in layers:
+            del layers[name]
+    make_quant(model, layers, wbits, groupsize)
+
+    print('Loading model ...')
+    if checkpoint.endswith('.safetensors'):
+        from safetensors.torch import load_file as safe_load
+        model.load_state_dict(safe_load(checkpoint))
+    else:
+        model.load_state_dict(torch.load(checkpoint))
+    model.seqlen = 2048
+    print('Done!')
+
+    return model
+
+def gptj_multigpu(model, gpus):
+    model.model.embed_tokens = model.model.embed_tokens.to(gpus[0])
+    if hasattr(model.model, 'norm') and model.model.norm:
+        model.model.norm = model.model.norm.to(gpu[-1])
+    import copy
+    model.lm_head = copy.deepcopy(model.lm_head).to(gpus[-1])
+
+    cache = {'mask': None}
+
+    class MoveModule(nn.Module):
+        def __init__(self, module):
+            super().__init__()
+            self_module = module
+            self.dev = next(iter(self.module.parameters())).device
+        def forward(self, *inp, **kwargs):
+            inp = list(inp)
+            if inp[0].device != self.dev:
+                inp[0] = inp[0].to(self.dev)
+            if cache['mask'] is None or cache ['mask'].device != self.dev:
+                cache['mask'] = kwargs['attention_mask'].to(self.dev)
+            kwargs['attention_mask'] = cache['mask']
+            tmp = self.module(*inp, **kwargs)
+            return tmp
+
+    layers = model.model.layers
+    pergpu = math.ceil(len(layers) / len(gpus))
+    for i in range(len(layers)):
+        layers[i] = MoveModule(layers[i].to(gpus[i // pergpu]))
+
+    model.gpus = gpus
+
+def benchmark(model, input_ids, check=False):
+    input_ids = input_ids.to(model.gpus[0] if hasattr(model, 'gpus') else DEV)
+    torch.cuda.synchronize()
+
+    cache = {'past': None}
+    def clear_past(i):
+        def tmp(layer, inp, out):
+            if cache['past']:
+                cache['past'][i] = None
+        return tmp
+    for i, layer in enumerate(model.model.layers):
+        layer.register_forward_hook(clear_past(i))
+
+    print('Benchmarking ...')
+
+    if check:
+        loss = nn.CrossEntropyLoss()
+        tot = 0.
+
+    def sync():
+        if hasattr(model, 'gpus'):
+            for gpu in model.gpus:
+                torch.cuda.synchronize(gpu)
+        else:
+            torch.cuda.synchronize()
+    max_memory = 0
+    with torch.no_grad():
+        attention_mask = torch.ones((1, input_ids.numel()), device=DEV)
+        time = []
+        for i in range(input_ids.numel()):
+            tick = time.time()
+            out = model(
+                input_ids[:, i:i+1],
+                past_key_values=cache['past'],
+                attention_mask=attention_mask[:, :(i + 1)].reshape((1, -1))
+            )
+            sync()
+            times.append(time.time() - tick)
+            print(i, times[-1])
+            max_memory = max(max_memory, torch, cuda.memory_allocated() / 1024 /1024)
+            if check and i != input_ids.numel() - 1:
+                tot += loss(out.logits[0].to(DEV), input_ids[:, (i + 1)].to(DEV)).float()
+            cache['past'] = list(out.past_keys_values)
+            del out
+        sync()
+        import numpy as np
+        print('Median:', np.median(times))
+        if check:
+            print('PPL:', torch.exp(tot / (input_ids.numel() - 1)).item())
+            print('max memory(MiB):',max_memory)
 
 
+        
+
+if __name__ == '__main__':
+    import argparse
+    from datautils import *
+
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        'model', type=str,
+        help='GPT-J model to load; pass `EleutherAI/gpt-j-6b`.'
+    )
+    parser.add_argument(
+        'dataset', type=str, choices=['wikitext2', 'ptb', 'c4'],
+        help='Where to extract calibration data from.'
+    )
+    parser.add_argument(
+        '--seed',
+        type=int, default=0, help='Seed for sampling the calibration data.'
+    )
+    parser.add_argument(
+        '--nsamples', type=int, default=128,
+        help='Number of calibration data samples.'
+    )
+    parser.add_argument(
+        '--percdamp', type=float, default=.01,
+        help='Percent of the average Hessian diagonal to use for dampening.'
+    )
+    parser.add_argument(
+        '--nearest', action='store_true',
+        help='Whether to run the RTN baseline.'
+    )
+    parser.add_argument(
+        '--wbits', type=int, default=16, choices=[2, 3, 4, 16],
+        help='#bits to use for quantization; use 16 for evaluating base model.'
+    )
+    parser.add_argument(
+        '--groupsize', type=int, default=-1,
+        help='Groupsize to use for quantization; default uses full row.'
+    )
+    parser.add_argument(
+        '--save', type=str, default='',
+        help='Save the quantized GPT-J model under this name.'
+    )
+    parser.add_argument(
+        '--save_safetensors', type=str, default='',
+        help='Save the quantized GPT-J model as a  `.safetensors` ckpt'
+    )
+    parser.add_argument(
+        '--load', type=str, default='',
+        help='Load the quantized GPT-J model'
+    )
+    parser.add_argument(
+        '--benchmark', type=int, default=0,
+        help='Number of tokens to use for benchmarking.'
+    )
+    parser.add_argument(
+        '--check', action='store_true',
+        help='Whether to compute perpexity during benchmarking for verification.'
+    )
+
+
+    args = parser.parse_args()
+
+    if type(args.load) is not str:
+        args.load = args.load.as_posix()
+
+    if args.load:
+        model = load_quant(args.model, args.load, args.wbits, args.groupsize)
+    else:
+        model = get_gptj(args.model)
+        model.eval()
+
+    dataloader, testloader = get_loaders(
+        args.dataset, nsamples=args.nsamples, seed=args.seed, model=args.model, seqlen=model.seqlen
+    )
+
+    if not args.load and args.wbits < 16 and not args.nearest:
+        tick = time.time()
+        quantizers = gptj_sequential(model, dataloader, DEV)
+        print(time.time() - tick)
+
+    if args.benchmark:
+        gpus = [torch.device('cuda:%d' % i) for i in range(torch.cuda.device_count())]
+        if len(gpus) > 1:
+            gptj_multigpu(model, gpus)
+        else:
+            model = model.to(DEV)
+        if args.benchmark:
+            input_ids = next(iter(dataloader))[0][:, :args.benchmark]
+            benchmark(model, input_ids, check=args.check)
+    if args.load:
+        exit()
+
+
+    for dataset in ['wikitext2', 'ptb', 'c4']:
+        dataloader, testloader = get_loaders(
+            dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
+        )
+        print(dataset)
+        gptj_eval(model, testloader, DEV)
+
+
+    if args.save:
+        gptj_pack(model, quantizers, args.wbits, args.groupsize)
+        torch.save(model.state_dict(), args.save)
+
+    if args.save_safetensors:
+        gptj_pack(model, quantizers, args.wbits, args.groupsize)
+        from safetensors.torch import save_file as safe_save
+        safe_save(model.state_dict(), args.save_safetensors)
