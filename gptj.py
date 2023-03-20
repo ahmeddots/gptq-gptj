@@ -213,7 +213,7 @@ def gptj_pack(model, quantizers, wbits, groupsize):
     for name in qlayers:
         print(name)
         quantizers[name],scale,zero = quantizers[name]
-        quantizers[name],scale,zero - quantizers[name].cpu(),scale.cpu(),zero.cpu()
+        quantizers[name],scale,zero = quantizers[name].cpu(),scale.cpu(),zero.cpu()
         qlayers[name].pack(layers[name], scale, zero)
     print('Done!')
     return model
