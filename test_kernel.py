@@ -71,7 +71,7 @@ model = nn.Sequential(
     nn.Linear(M, N)
 )
 
-# state_dict = torch.load("EleutherAI/gpt-j-6b", map_location=DEV)  # Not sure if loading dicts is necessary, needs testing.s
+# state_dict = torch.load("EleutherAI/gpt-j-6b", map_location=DEV)  # Not sure if loading dicts is necessary, needs testing.
 # model.load_state_dict(state_dict)
 
 quantizer = Quantizer()
