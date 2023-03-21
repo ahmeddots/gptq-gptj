@@ -1,26 +1,34 @@
 import time
 import math
+import copy
 
+import argparse
+import numpy as np
 import torch
 import torch.nn as nn
 import transformers
 
+from datautils import *
+from safetensors.torch import save_file as safe_save
+from safetensors.torch import load_file as safe_load
 from gptq import *
 from modelutils import *
 from quant import *
+from transformers import GPTJConfig, GPTJForCausalLM
+
+
+def skip(*args, **kwargs):
+    pass
 
 
 def get_gptj(model):
-    import torch
-
-    def skip(*args, **kwargs):
-        pass
     torch.nn.init.kaiming_uniform_ = skip
     torch.nn.init.uniform_ = skip
     torch.nn.init.normal_ = skip
-    from transformers import GPTJForCausalLM
+
     model = GPTJForCausalLM.from_pretrained(model, torch_dtype='auto')
     model.seqlen = 2048
+
     return model
 
 
@@ -51,12 +59,15 @@ def gptj_sequential(model, dataloader, dev, means=None, stds=None):
             cache['i'] += 1
             cache['attention_mask'] = kwargs['attention_mask']
             raise ValueError
+
     layers[0] = Catcher(layers[0])
+
     for batch in dataloader:
         try:
             model(batch[0].to(dev))
         except ValueError:
             pass
+
     layers[0] = layers[0].module
 
     layers = model.transformer.h
@@ -87,12 +98,16 @@ def gptj_sequential(model, dataloader, dev, means=None, stds=None):
             def tmp(_, inp, out):
                 gptq[name].add_batch(inp[0].data, out.data)
             return tmp
+
         handles = []
+
         for name in subset:
             handles.append(subset[name].register_forward_hook(add_batch(name)))
+
         for j in range(args.nsamples):
             outs[j] = layer(inps[j].unsqueeze(
                 0), attention_mask=attention_mask)[0]
+
         for h in handles:
             h.remove()
 
@@ -147,19 +162,23 @@ def gptj_eval(model, testenc, dev):
             cache['i'] += 1
             cache['attention_mask'] = kwargs['attention_mask']
             raise ValueError
+
     layers[0] = Catcher(layers[0])
+
     for i in range(nsamples):
         batch = testenc[:, (i * model.seqlen):((i + 1) * model.seqlen)].to(dev)
         try:
             model(batch)
         except ValueError:
             pass
+
     layers[0] = layers[0].module
 
     layers = model.transformer.h
     layers[0] = layers[0].cpu()
     model.transformer.wte = model.transformer.wte.cpu()
     model.transformer.ln_f = model.transformer.ln_f.cpu()
+
     torch.cuda.empty_cache()
 
     outs = torch.zeros_like(inps)
@@ -195,6 +214,7 @@ def gptj_eval(model, testenc, dev):
 
     testenc = testenc.to(dev)
     nlls = []
+
     for i in range(nsamples):
         hidden_states = inps[i].unsqueeze(0)
         hidden_states = model.transformer.ln_f(hidden_states)
@@ -208,6 +228,7 @@ def gptj_eval(model, testenc, dev):
             shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
         neg_log_likelihood = loss.float() * model.seqlen
         nlls.append(neg_log_likelihood)
+
     ppl = torch.exp(torch.stack(nlls).sum() / (nsamples * model.seqlen))
     print(ppl.item())
 
@@ -217,8 +238,11 @@ def gptj_eval(model, testenc, dev):
 def gptj_pack(model, quantizers, wbits, groupsize):
     layers = find_layers(model)
     layers = {n: layers[n] for n in quantizers}
+
     make_quant(model, quantizers, wbits, groupsize)
+
     qlayers = find_layers(model, [QuantLinear])
+
     print('Packing ...')
     for name in qlayers:
         print(name)
@@ -226,39 +250,42 @@ def gptj_pack(model, quantizers, wbits, groupsize):
         quantizers[name], scale, zero = quantizers[name].cpu(
         ), scale.cpu(), zero.cpu()
         qlayers[name].pack(layers[name], scale, zero)
+
     print('Done!')
     return model
 
 
 def load_quant(model, checkpoint, wbits, groupsize):
-    from transformers import GPTJConfig, GPTJForCausalLM
     config = GPTJConfig.from_pretrained(model)
 
-    def noop(*args, **kwargs):
-        pass
-    torch.nn.init.kaiming_uniform_ = noop
-    torch.nn.init.uniform_ = noop
-    torch.nn.init.normal_ = noop
+    torch.nn.init.kaiming_uniform_ = skip
+    torch.nn.init.uniform_ = skip
+    torch.nn.init.normal_ = skip
 
     torch.set_default_dtype(torch.half)
     transformers.modeling_utils._init_weights = False
     torch.set_default_dtype(torch.half)
     model = GPTJForCausalLM(config)
     torch.set_default_dtype(torch.float)
+
     model = model.eval()
     layers = find_layers(model)
+
     for name in ['lm_head']:
         if name in layers:
             del layers[name]
+
     make_quant(model, layers, wbits, groupsize)
 
     print('Loading model ...')
+
     if checkpoint.endswith('.safetensors'):
-        from safetensors.torch import load_file as safe_load
         model.load_state_dict(safe_load(checkpoint))
     else:
         model.load_state_dict(torch.load(checkpoint))
+
     model.seqlen = 2048
+
     print('Done!')
 
     return model
@@ -267,8 +294,7 @@ def load_quant(model, checkpoint, wbits, groupsize):
 def gptj_multigpu(model, gpus):
     model.model.embed_tokens = model.model.embed_tokens.to(gpus[0])
     if hasattr(model.model, 'norm') and model.model.norm:
-        model.model.norm = model.model.norm.to(gpu[-1])
-    import copy
+        model.model.norm = model.model.norm.to(gpus[-1])
     model.lm_head = copy.deepcopy(model.lm_head).to(gpus[-1])
 
     cache = {'mask': None}
@@ -276,7 +302,7 @@ def gptj_multigpu(model, gpus):
     class MoveModule(nn.Module):
         def __init__(self, module):
             super().__init__()
-            self_module = module
+            self.module = module
             self.dev = next(iter(self.module.parameters())).device
 
         def forward(self, *inp, **kwargs):
@@ -291,6 +317,7 @@ def gptj_multigpu(model, gpus):
 
     layers = model.model.layers
     pergpu = math.ceil(len(layers) / len(gpus))
+
     for i in range(len(layers)):
         layers[i] = MoveModule(layers[i].to(gpus[i // pergpu]))
 
@@ -308,6 +335,7 @@ def benchmark(model, input_ids, check=False):
             if cache['past']:
                 cache['past'][i] = None
         return tmp
+
     for i, layer in enumerate(model.model.layers):
         layer.register_forward_hook(clear_past(i))
 
@@ -323,10 +351,12 @@ def benchmark(model, input_ids, check=False):
                 torch.cuda.synchronize(gpu)
         else:
             torch.cuda.synchronize()
+
     max_memory = 0
+
     with torch.no_grad():
         attention_mask = torch.ones((1, input_ids.numel()), device=DEV)
-        time = []
+        times = []
         for i in range(input_ids.numel()):
             tick = time.time()
             out = model(
@@ -336,16 +366,19 @@ def benchmark(model, input_ids, check=False):
             )
             sync()
             times.append(time.time() - tick)
+
             print(i, times[-1])
-            max_memory = max(max_memory, torch,
-                             cuda.memory_allocated() / 1024 / 1024)
+
+            max_memory = max(
+                max_memory, torch.cuda.memory_allocated() / 1024 / 1024)
+
             if check and i != input_ids.numel() - 1:
                 tot += loss(out.logits[0].to(DEV),
                             input_ids[:, (i + 1)].to(DEV)).float()
+
             cache['past'] = list(out.past_keys_values)
             del out
         sync()
-        import numpy as np
         print('Median:', np.median(times))
         if check:
             print('PPL:', torch.exp(tot / (input_ids.numel() - 1)).item())
@@ -353,8 +386,6 @@ def benchmark(model, input_ids, check=False):
 
 
 if __name__ == '__main__':
-    import argparse
-    from datautils import *
 
     parser = argparse.ArgumentParser()
 
@@ -441,6 +472,7 @@ if __name__ == '__main__':
         if args.benchmark:
             input_ids = next(iter(dataloader))[0][:, :args.benchmark]
             benchmark(model, input_ids, check=args.check)
+
     if args.load:
         exit()
 
@@ -457,5 +489,4 @@ if __name__ == '__main__':
 
     if args.save_safetensors:
         gptj_pack(model, quantizers, args.wbits, args.groupsize)
-        from safetensors.torch import save_file as safe_save
         safe_save(model.state_dict(), args.save_safetensors)
